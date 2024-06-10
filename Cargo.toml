@@ -11,3 +11,8 @@ serde = "1.0.148"
 shuttle-shared-db = { version = "0.45.0", features = ["postgres", "sqlx"] }
 sqlx = "0.7.1"
 tokio = "1.26.0"
+aes-gcm = "0.10" 
+mysql = "25.0.1"
+rand = "0.8" 
+rpassword = "7.3.1"
+dotenv = "0.15.0"
