@@ -4,7 +4,7 @@ use actix_web::{
 use actix_session::{Session, SessionMiddleware, storage::CookieSessionStore};
 use serde::{Deserialize, Serialize};
 use shuttle_actix_web::ShuttleActixWeb;
-use sqlx::{FromRow, PgPool, Row};
+use sqlx::{FromRow, PgPool};
 
 #[post("/register")]
 async fn register(user: web::Json<UserNew>, state: web::Data<AppState>) -> Result<Json<User>> {
