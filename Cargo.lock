@@ -2119,6 +2119,7 @@ dependencies = [
  "actix-session",
  "actix-web",
  "dotenv",
+ "rand",
  "serde",
  "shuttle-actix-web",
  "shuttle-runtime",

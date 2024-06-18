@@ -1,3 +1,5 @@
+#![allow(unused_imports)]
+
 use actix_web::{
     cookie::Key, delete, error, get, middleware::Logger, post, put, web::{self, Json, ServiceConfig}, Result
 };
@@ -5,14 +7,22 @@ use actix_session::{Session, SessionMiddleware, storage::CookieSessionStore};
 use serde::{Deserialize, Serialize};
 use shuttle_actix_web::ShuttleActixWeb;
 use sqlx::{FromRow, PgPool, Row};
+use aes_gcm::aead::{Aead, KeyInit, OsRng};
+use aes_gcm::aes::Aes256;
+use aes_gcm::AesGcm;
+use aes_gcm::Nonce;
+use aes_gcm::aead::consts::U12;
+use rand::{Rng, RngCore};
+
 
 #[post("/register")]
 async fn register(user: web::Json<UserNew>, state: web::Data<AppState>) -> Result<Json<User>> {
     let user = sqlx::query_as::<_, User>(
-        "INSERT INTO users (username, password) VALUES ($1, $2) RETURNING id, username, password"
+        "INSERT INTO users (username, password, chave_criptografia) VALUES ($1, $2, $3) RETURNING chave_criptografia, username, password"
     )
     .bind(&user.username)
     .bind(&user.password)
+    .bind(gerar_chave())
     .fetch_one(&state.pool)
     .await
     .map_err(|e| error::ErrorBadRequest(e.to_string()))?;
@@ -23,7 +33,7 @@ async fn register(user: web::Json<UserNew>, state: web::Data<AppState>) -> Resul
 #[post("/login")]
 async fn login(user: web::Json<UserNew>, state: web::Data<AppState>, session: Session) -> Result<Json<User>> {
     let user_result = sqlx::query_as::<_, User>(
-        "SELECT id, username, password FROM users WHERE username = $1 AND password = $2"
+        "SELECT chave_criptografia, username, password FROM users WHERE username = $1 AND password = $2"
     )
     .bind(&user.username)
     .bind(&user.password)
@@ -32,7 +42,7 @@ async fn login(user: web::Json<UserNew>, state: web::Data<AppState>, session: Se
 
     match user_result {
         Ok(user) => {
-            session.insert("user_id", user.id).map_err(|e| error::ErrorInternalServerError(e.to_string()))?;
+            session.insert("chave", user.chave_criptografia).map_err(|e| error::ErrorInternalServerError(e.to_string()))?;
             Ok(Json(user))
         },
         Err(e) => Err(error::ErrorBadRequest(e.to_string())),
@@ -52,16 +62,21 @@ async fn add_password(
     session: Session,
 ) -> Result<Json<Password>> {
     // Verificar se o usuário está autenticado
-    if let Some(user_id) = session.get::<i32>("user_id").map_err(|e| error::ErrorInternalServerError(e.to_string()))? {
+    if let Some(chave) = session.get::<Vec<u8>>("chave").map_err(|e| error::ErrorInternalServerError(e.to_string()))? {
+        //criptografa a senha;
+        let chavee:[u8;32] = chave.as_slice().try_into().expect("chave invalida");
+        let(nonce,senha) = encrypt(&chavee, password.password.as_bytes());
+
         // Inserir a nova senha no banco de dados associada ao user_id da sessão
         let password = sqlx::query_as::<_, Password>(
-            "INSERT INTO passwords (service, username, password, folder, user_id) VALUES ($1, $2, $3, $4, $5) RETURNING id, service, username, password, folder, user_id"
+            "INSERT INTO passwords (nonce, service, username, password, folder, chave) VALUES ($1, $2, $3, $4, $5, $6) RETURNING nonce, id, service, username, password, folder, chave"
         )
+        .bind(nonce)
         .bind(&password.service)
         .bind(&password.username)
-        .bind(&password.password)
+        .bind(senha)
         .bind(&password.folder)
-        .bind(user_id) // Usar o user_id da sessão
+        .bind(chave) // Usar a chave da sessão
         .fetch_one(&state.pool)
         .await
         .map_err(|e| error::ErrorBadRequest(e.to_string()))?;
@@ -75,11 +90,11 @@ async fn add_password(
 
 #[get("/passwords")]
 async fn list_passwords(state: web::Data<AppState>, session: Session) -> Result<Json<Vec<Password>>> {
-    if let Some(user_id) = session.get::<i32>("user_id").map_err(|e| error::ErrorInternalServerError(e.to_string()))? {
+    if let Some(chave) = session.get::<Vec<u8>>("chave").map_err(|e| error::ErrorInternalServerError(e.to_string()))? {
         let passwords = sqlx::query_as::<_, Password>(
-            "SELECT * FROM passwords WHERE user_id = $1"
+            "SELECT * FROM passwords WHERE chave = $1"
         )
-        .bind(user_id)
+        .bind(chave)
         .fetch_all(&state.pool)
         .await
         .map_err(|e| error::ErrorBadRequest(e.to_string()))?;
@@ -97,12 +112,12 @@ async fn list_passwords_by_folder(
     query: web::Query<FolderQuery>,
 ) -> Result<Json<Vec<Password>>> {
     // Verificar se o usuário está autenticado
-    if let Some(user_id) = session.get::<i32>("user_id").map_err(|e| error::ErrorInternalServerError(e.to_string()))? {
+    if let Some(chave) = session.get::<Vec<u8>>("chave").map_err(|e| error::ErrorInternalServerError(e.to_string()))? {
         // Buscar as senhas do usuário autenticado no banco de dados
         let passwords = sqlx::query_as::<_, Password>(
-            "SELECT * FROM passwords WHERE user_id = $1 AND folder = $2"
+            "SELECT * FROM passwords WHERE chave = $1 AND folder = $2"
         )
-        .bind(user_id)
+        .bind(chave)
         .bind(&query.folder)
         .fetch_all(&state.pool)
         .await
@@ -121,12 +136,12 @@ async fn list_folders(
     session: Session,
 ) -> Result<web::Json<Vec<String>>> {
     // Verificar se o usuário está autenticado
-    if let Some(user_id) = session.get::<i32>("user_id").map_err(|e| error::ErrorInternalServerError(e.to_string()))? {
+    if let Some(chave) = session.get::<Vec<u8>>("chave").map_err(|e| error::ErrorInternalServerError(e.to_string()))? {
         // Buscar as pastas do usuário autenticado no banco de dados
         let folders = sqlx::query_as::<_, Folder>(
-            "SELECT DISTINCT folder FROM passwords WHERE user_id = $1"
+            "SELECT DISTINCT folder FROM passwords WHERE chave = $1"
         )
-        .bind(user_id)
+        .bind(chave)
         .fetch_all(&state.pool)
         .await
         .map_err(|e| error::ErrorBadRequest(e.to_string()))?;
@@ -150,13 +165,13 @@ async fn edit_password(
     session: Session,
 ) -> Result<Json<Password>> {
     // Verificar se o usuário está autenticado
-    if let Some(user_id) = session.get::<i32>("user_id").map_err(|e| error::ErrorInternalServerError(e.to_string()))? {
+    if let Some(chave) = session.get::<Vec<u8>>("chave").map_err(|e| error::ErrorInternalServerError(e.to_string()))? {
         // Verificar se a senha pertence ao usuário autenticado
         let password_exists = sqlx::query(
-            "SELECT 1 FROM passwords WHERE id = $1 AND user_id = $2"
+            "SELECT 1 FROM passwords WHERE id = $1 AND chave = $2"
         )
         .bind(*path)
-        .bind(user_id)
+        .bind(chave.clone())
         .fetch_optional(&state.pool)
         .await
         .map_err(|e| error::ErrorBadRequest(e.to_string()))?;
@@ -165,13 +180,16 @@ async fn edit_password(
             return Err(error::ErrorUnauthorized("Unauthorized"));
         }
 
+        let chavee:[u8;32] = chave.as_slice().try_into().expect("chave invalida");
+        let(nonce,senha) = encrypt(&chavee, password.password.as_bytes());
         // Atualizar a senha no banco de dados
         let updated_password = sqlx::query_as::<_, Password>(
-            "UPDATE passwords SET username = $1, password = $2, folder = $3 WHERE id = $4 RETURNING id, service, username, password, folder, user_id"
+            "UPDATE passwords SET username = $1, password = $2, folder = $3, nonce = $4 WHERE id = $5 RETURNING nonce, id, service, username, password, folder, chave"
         )
         .bind(&password.username)
-        .bind(&password.password)
+        .bind(senha)
         .bind(&password.folder)
+        .bind(nonce)
         .bind(*path)
         .fetch_one(&state.pool)
         .await
@@ -191,13 +209,13 @@ async fn delete_password(
     session: Session,
 ) -> Result<web::Json<&'static str>> {
     // Verificar se o usuário está autenticado
-    if let Some(user_id) = session.get::<i32>("user_id").map_err(|e| error::ErrorInternalServerError(e.to_string()))? {
+    if let Some(chave) = session.get::<Vec<u8>>("chave").map_err(|e| error::ErrorInternalServerError(e.to_string()))? {
         // Verificar se a senha pertence ao usuário autenticado
         let password_exists = sqlx::query(
-            "SELECT 1 FROM passwords WHERE id = $1 AND user_id = $2"
+            "SELECT 1 FROM passwords WHERE id = $1 AND chave = $2"
         )
         .bind(*path)
-        .bind(user_id)
+        .bind(chave)
         .fetch_optional(&state.pool)
         .await
         .map_err(|e| error::ErrorBadRequest(e.to_string()))?;
@@ -260,12 +278,14 @@ struct AppState {
 
 #[derive(Serialize, Deserialize, FromRow)]
 struct Password {
-    pub id: i32,
+    pub nonce:[u8;12],
+    pub id:i32,
     pub service: String,
     pub username: String,
-    pub password: String,
+    pub password: Vec<u8>,
     pub folder: String,
-    pub user_id: i32,
+    pub chave:[u8;32]
+
 }
 
 #[derive(Serialize, Deserialize)]
@@ -285,7 +305,7 @@ struct PasswordUpdate {
 
 #[derive(Serialize, Deserialize, sqlx::FromRow)]
 struct User {
-    pub id: i32,
+    pub chave_criptografia: [u8;32],
     pub username: String,
     pub password: String,
 }
@@ -304,4 +324,37 @@ struct FolderQuery {
 #[derive(sqlx::FromRow)]
 struct Folder {
     folder: String,
+}
+
+//função para criptografar.
+pub fn encrypt(chave: &[u8; 32],senha_criptografar: &[u8]) ->(Vec<u8>,Vec<u8>){
+    //inicia a cifra AES-GCM com a chave fornecida;
+
+    let cifra = AesGcm::<Aes256, U12>::new_from_slice(chave).unwrap();
+    //gera un nonce aleatorio;
+    let mut nonce = [0u8; 12];
+    OsRng.fill_bytes(&mut nonce);
+    //criptografa os dados;
+    let senha_criptografada = cifra.encrypt(Nonce::from_slice(&nonce),senha_criptografar).expect("Falha ao criptografar");
+
+    //retorna uma tupla com a senha ja criptografada e o nonce;
+
+    (nonce.to_vec(),senha_criptografada)
+}
+
+pub fn decrypt(chave: &[u8;32], nonce: &[u8], senha_criptografada: &[u8]) -> Vec<u8>{
+    //inicia a cifra;
+    let cifra = AesGcm::<Aes256, U12>::new_from_slice(chave).unwrap();
+
+    //Descriptografa;
+    let senha_descriptografada = cifra.decrypt(Nonce::from_slice(nonce), senha_criptografada).expect("Erro ao descriptografar");
+
+    senha_descriptografada
+
+}
+
+pub fn gerar_chave()->[u8;32]{
+    let mut chave = [0u8;32];
+    OsRng.fill_bytes(&mut chave);
+    chave
 }

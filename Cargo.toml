@@ -13,3 +13,6 @@ shuttle-shared-db = { version = "0.46.0", features = ["postgres", "sqlx"] }
 sqlx = "0.7.1"
 tokio = "1.26.0"
 dotenv = "0.15.0"
+aes-gcm = "0.10"
+rand = "0.8"
+
