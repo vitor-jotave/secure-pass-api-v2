@@ -89,17 +89,31 @@ async fn add_password(
 }
 
 #[get("/passwords")]
-async fn list_passwords(state: web::Data<AppState>, session: Session) -> Result<Json<Vec<Password>>> {
+async fn list_passwords(state: web::Data<AppState>, session: Session) -> Result<Json<Vec<SenhaSaida>>> {
     if let Some(chave) = session.get::<Vec<u8>>("chave").map_err(|e| error::ErrorInternalServerError(e.to_string()))? {
         let passwords = sqlx::query_as::<_, Password>(
             "SELECT * FROM passwords WHERE chave = $1"
         )
-        .bind(chave)
+        .bind(chave.clone())
         .fetch_all(&state.pool)
         .await
         .map_err(|e| error::ErrorBadRequest(e.to_string()))?;
 
-        Ok(Json(passwords))
+        let chavee:[u8;32] = chave.as_slice().try_into().expect("chave invalida");
+
+        let senhaoutput: Vec<SenhaSaida> = passwords.into_iter().map(|password| {
+            SenhaSaida {
+                nonce: password.nonce,
+                id: password.id,
+                service: password.service,
+                username: password.username,
+                password: String::from_utf8(decrypt(&chavee, &password.nonce, &password.password)).expect("Senha invalida"),
+                folder: password.folder,
+                chave: password.chave,
+            }
+        }).collect();
+
+        Ok(Json(senhaoutput))
     } else {
         Err(error::ErrorUnauthorized("Unauthorized"))
     }
@@ -110,20 +124,34 @@ async fn list_passwords_by_folder(
     state: web::Data<AppState>,
     session: Session,
     query: web::Query<FolderQuery>,
-) -> Result<Json<Vec<Password>>> {
+) -> Result<Json<Vec<SenhaSaida>>> {
     // Verificar se o usuário está autenticado
     if let Some(chave) = session.get::<Vec<u8>>("chave").map_err(|e| error::ErrorInternalServerError(e.to_string()))? {
         // Buscar as senhas do usuário autenticado no banco de dados
         let passwords = sqlx::query_as::<_, Password>(
             "SELECT * FROM passwords WHERE chave = $1 AND folder = $2"
         )
-        .bind(chave)
+        .bind(chave.clone())
         .bind(&query.folder)
         .fetch_all(&state.pool)
         .await
         .map_err(|e| error::ErrorBadRequest(e.to_string()))?;
 
-        Ok(Json(passwords))
+        let chavee:[u8;32] = chave.as_slice().try_into().expect("chave invalida");
+
+        let senhaoutput: Vec<SenhaSaida> = passwords.into_iter().map(|password| {
+            SenhaSaida {
+                nonce: password.nonce,
+                id: password.id,
+                service: password.service,
+                username: password.username,
+                password: String::from_utf8(decrypt(&chavee, &password.nonce, &password.password)).expect("Senha invalida"),
+                folder: password.folder,
+                chave: password.chave,
+            }
+        }).collect();
+
+        Ok(Json(senhaoutput))
     } else {
         // Se o usuário não estiver autenticado, retornar um erro de autorização
         Err(error::ErrorUnauthorized("Unauthorized"))
@@ -286,6 +314,17 @@ struct Password {
     pub folder: String,
     pub chave:[u8;32]
 
+}
+
+#[derive(Debug, Serialize)]
+struct SenhaSaida {
+    pub nonce: [u8; 12],
+    pub id: i32,
+    pub service: String,
+    pub username: String,
+    pub password: String, 
+    pub folder: String,
+    pub chave: [u8; 32],
 }
 
 #[derive(Serialize, Deserialize)]
