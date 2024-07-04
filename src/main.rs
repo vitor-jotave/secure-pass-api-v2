@@ -1,7 +1,7 @@
 #![allow(unused_imports)]
 
 use actix_web::{
-    cookie::Key, delete, error, get, middleware::Logger, post, put, web::{self, Json, ServiceConfig}, Result
+    cookie::{Key, SameSite}, delete, error, get, http, middleware::Logger, post, put, web::{self, Json, ServiceConfig}, Result
 };
 use actix_session::{Session, SessionMiddleware, storage::CookieSessionStore};
 use serde::{Deserialize, Serialize};
@@ -13,6 +13,7 @@ use aes_gcm::AesGcm;
 use aes_gcm::Nonce;
 use aes_gcm::aead::consts::U12;
 use rand::{Rng, RngCore};
+use actix_cors::Cors;
 
 
 #[post("/register")]
@@ -279,10 +280,22 @@ async fn main(
     let secret_key = Key::generate(); // chave secreta para criptografia de cookies
 
     let config = move |cfg: &mut ServiceConfig| {
+        let cors = Cors::default()
+            .allow_any_origin()
+            .allow_any_method()
+            .allowed_headers(vec![http::header::AUTHORIZATION, http::header::ACCEPT, http::header::CONTENT_TYPE, http::header::ORIGIN, http::header::COOKIE, http::header::SET_COOKIE])
+            .supports_credentials();
+
+        let session_middleware = SessionMiddleware::builder(CookieSessionStore::default(), secret_key.clone())
+            .cookie_secure(true) // Garante que os cookies são enviados apenas via HTTPS
+            .cookie_same_site(SameSite::None) // Define SameSite como None
+            .build();
+
         cfg.service(
             web::scope("/api/v1")
                 .wrap(Logger::default())
-                .wrap(SessionMiddleware::builder(CookieSessionStore::default(), secret_key.clone()).build())
+                .wrap(session_middleware)
+                .wrap(cors)
                 .service(register)
                 .service(login)
                 .service(logout)
