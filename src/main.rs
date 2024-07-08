@@ -7,11 +7,9 @@ use actix_session::{Session, SessionMiddleware, storage::CookieSessionStore};
 use serde::{Deserialize, Serialize};
 use shuttle_actix_web::ShuttleActixWeb;
 use sqlx::{FromRow, PgPool, Row};
-use aes_gcm::aead::{Aead, KeyInit, OsRng};
+use aes_gcm::aead::{Aead, KeyInit, OsRng, consts::U12};
 use aes_gcm::aes::Aes256;
-use aes_gcm::AesGcm;
-use aes_gcm::Nonce;
-use aes_gcm::aead::consts::U12;
+use aes_gcm::{AesGcm, Nonce};
 use rand::{Rng, RngCore};
 use actix_cors::Cors;
 
@@ -213,13 +211,14 @@ async fn edit_password(
         let(nonce,senha) = encrypt(&chavee, password.password.as_bytes());
         // Atualizar a senha no banco de dados
         let updated_password = sqlx::query_as::<_, Password>(
-            "UPDATE passwords SET username = $1, password = $2, folder = $3, nonce = $4 WHERE id = $5 RETURNING nonce, id, service, username, password, folder, chave"
+            "UPDATE passwords SET username = $1, password = $2, folder = $3, nonce = $4, service = $5 WHERE id = $6 RETURNING nonce, id, service, username, password, folder, chave"
         )
         .bind(&password.username)
         .bind(senha)
         .bind(&password.folder)
         .bind(nonce)
         .bind(*path)
+        .bind(&password.service)
         .fetch_one(&state.pool)
         .await
         .map_err(|e| error::ErrorBadRequest(e.to_string()))?;
@@ -353,6 +352,7 @@ struct PasswordUpdate {
     pub username: String,
     pub password: String,
     pub folder: String,
+    pub service: String,
 }
 
 #[derive(Serialize, Deserialize, sqlx::FromRow)]
