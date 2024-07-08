@@ -217,8 +217,8 @@ async fn edit_password(
         .bind(senha)
         .bind(&password.folder)
         .bind(nonce)
-        .bind(*path)
         .bind(&password.service)
+        .bind(*path)
         .fetch_one(&state.pool)
         .await
         .map_err(|e| error::ErrorBadRequest(e.to_string()))?;
